@@ -5,21 +5,23 @@ import { useSpring, animated } from 'react-spring';
 import ForceGraph2D from 'react-force-graph-2d';
 import { toast } from 'react-toastify';
 import { MOCK_PERSONA_DATA } from './mockData';
+import { generateEnhancedGraph } from './graphGenerator';
+import { X } from 'lucide-react';
 
-// Define new color mapping for Indian segments
+// Define color mapping for persona groups (keeping the same colors)
 const SEGMENT_COLORS = {
-  "North India": "#FF5733", // Vibrant Red
-  "South India": "#33FF57", // Bright Green
-  "East India": "#3357FF",  // Vivid Blue
-  "West India": "#F1C40F"   // Sunny Yellow
+  "Group A": "#FF5733", // Vibrant Red
+  "Group B": "#33FF57", // Bright Green
+  "Group C": "#3357FF", // Vivid Blue
+  "Group D": "#F1C40F"  // Sunny Yellow
 };
 
 const SEGMENT_LABELS = [
-  { id: "all", name: "All segments" },
-  { id: "north-india", name: "North India", color: SEGMENT_COLORS["North India"] },
-  { id: "south-india", name: "South India", color: SEGMENT_COLORS["South India"] },
-  { id: "east-india", name: "East India", color: SEGMENT_COLORS["East India"] },
-  { id: "west-india", name: "West India", color: SEGMENT_COLORS["West India"] }
+  { id: "all", name: "All personas" },
+  { id: "group-a", name: "Group A", color: SEGMENT_COLORS["Group A"] },
+  { id: "group-b", name: "Group B", color: SEGMENT_COLORS["Group B"] },
+  { id: "group-c", name: "Group C", color: SEGMENT_COLORS["Group C"] },
+  { id: "group-d", name: "Group D", color: SEGMENT_COLORS["Group D"] }
 ];
 
 const InitialView = () => {
@@ -30,13 +32,17 @@ const InitialView = () => {
   const [showResults, setShowResults] = useState(false);
   const [simulationResults, setSimulationResults] = useState(null);
   const [credits, setCredits] = useState(8);
-  const [openrouterKey, setOpenrouterKey] = useState();
+  const [openrouterKey, setOpenrouterKey] = useState('');
   const [activeSegments, setActiveSegments] = useState(['all']);
   const [personas, setPersonas] = useState([]);
   const [testingMessage, setTestingMessage] = useState('');
   const [editMode, setEditMode] = useState(false);
   const [blinkingNodes, setBlinkingNodes] = useState(new Set());
+  const [highlightedNodeId, setHighlightedNodeId] = useState(null);
+  const [selectedPersona, setSelectedPersona] = useState(null);
+  const [showDetailModal, setShowDetailModal] = useState(false);
   const graphRef = useRef();
+  const nodesFixedRef = useRef(false);
 
   // Animation for the input panel
   const [inputPanelOpen, setInputPanelOpen] = useState(true);
@@ -61,9 +67,8 @@ const InitialView = () => {
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
   };
 
-  // Load API key and generate graph on mount
+  // Generate graph on mount
   useEffect(() => {
-    setOpenrouterKey(process.env.REACT_APP_OPENROUTER_KEY || '')
     generatePersonas();
   }, []);
 
@@ -71,25 +76,138 @@ const InitialView = () => {
   useEffect(() => {
     if (personas.length > 0) {
       generateGraph();
+      nodesFixedRef.current = false; // Reset the fixed flag when generating a new graph
     }
   }, [personas, activeSegments]);
 
-  // Background animation effect during testing:
-  // Periodically update blinking nodes so that during testing most nodes turn grey
-  // while a subset glow with their original color.
+  // Effect to fix node positions after initial layout
   useEffect(() => {
-    if (isTesting) {
-      const interval = setInterval(() => {
-        const nodeCount = graphData.nodes.length;
-        const blinkCount = Math.min(nodeCount, 20); // Blink up to 20 nodes at a time
-        
-        const newBlinkingNodes = new Set();
-        for (let i = 0; i < blinkCount; i++) {
-          const randomNodeIndex = Math.floor(Math.random() * nodeCount);
-          if (randomNodeIndex < nodeCount && graphData.nodes[randomNodeIndex]) {
-            newBlinkingNodes.add(graphData.nodes[randomNodeIndex].id);
+    if (graphRef.current && graphData.nodes.length > 0 && !nodesFixedRef.current) {
+      const fixNodesTimeout = setTimeout(() => {
+        // Fix all node positions
+        if (graphRef.current && graphData.nodes.length > 0) {
+          // Stop the physics simulation
+          const fg = graphRef.current;
+          if (fg) {
+            try {
+              // Stop the simulation if possible
+              const simulation = fg.d3Force();
+              if (simulation && simulation.stop) {
+                simulation.stop();
+              }
+              
+              // Fix the position of all nodes
+              graphData.nodes.forEach(node => {
+                // Set fixed position coordinates to current position
+                node.fx = node.x || 0;
+                node.fy = node.y || 0;
+                
+                // Store original color for highlighting
+                node._color = node.color;
+              });
+              
+              nodesFixedRef.current = true;
+            } catch (error) {
+              console.error("Error fixing node positions:", error);
+            }
           }
         }
+      }, 2000); // Wait 2 seconds for initial layout
+      
+      return () => clearTimeout(fixNodesTimeout);
+    }
+  }, [graphData.nodes]);
+
+  // Background animation effect during testing:
+  // Progressively make more nodes colorful during testing to simulate 
+  // propagation of responses throughout the network
+  useEffect(() => {
+    if (isTesting) {
+      // Initial testing state: all nodes are gray except for a few blinking ones
+      // As time progresses, more nodes become colorful
+      
+      // Track the active colored nodes (starts empty, grows over time)
+      const activeNodeIds = new Set();
+      
+      // Timer to periodically update the active and blinking node sets
+      const interval = setInterval(() => {
+        const nodeCount = graphData.nodes.length;
+        
+        // Phase 1: Start with just a few bright nodes
+        if (activeNodeIds.size < nodeCount * 0.1) {
+          // Add some random nodes to the active set (about 2-5 per update)
+          const newActivationCount = Math.floor(Math.random() * 4) + 2;
+          
+          for (let i = 0; i < newActivationCount; i++) {
+            const randomNodeIndex = Math.floor(Math.random() * nodeCount);
+            if (randomNodeIndex < nodeCount && graphData.nodes[randomNodeIndex]) {
+              activeNodeIds.add(graphData.nodes[randomNodeIndex].id);
+            }
+          }
+        } 
+        // Phase 2: Middle of simulation, activate nodes connected to already active ones
+        else if (activeNodeIds.size < nodeCount * 0.5) {
+          // Find nodes connected to active nodes and activate them
+          const connectedNodeIds = new Set();
+          
+          graphData.links.forEach(link => {
+            const sourceId = typeof link.source === 'object' ? link.source.id : link.source;
+            const targetId = typeof link.target === 'object' ? link.target.id : link.target;
+            
+            // If one end is active but the other isn't, consider activating the inactive end
+            if (activeNodeIds.has(sourceId) && !activeNodeIds.has(targetId) && Math.random() < 0.3) {
+              connectedNodeIds.add(targetId);
+            } else if (activeNodeIds.has(targetId) && !activeNodeIds.has(sourceId) && Math.random() < 0.3) {
+              connectedNodeIds.add(sourceId);
+            }
+          });
+          
+          // Add the connected nodes to the active set
+          connectedNodeIds.forEach(id => activeNodeIds.add(id));
+          
+          // Also add some random nodes (1-3 per update)
+          const randomActivationCount = Math.floor(Math.random() * 3) + 1;
+          for (let i = 0; i < randomActivationCount; i++) {
+            const randomNodeIndex = Math.floor(Math.random() * nodeCount);
+            if (randomNodeIndex < nodeCount && graphData.nodes[randomNodeIndex]) {
+              activeNodeIds.add(graphData.nodes[randomNodeIndex].id);
+            }
+          }
+        }
+        // Phase 3: End of simulation, activate most remaining nodes
+        else {
+          // Activate almost all remaining nodes quickly
+          graphData.nodes.forEach(node => {
+            if (!activeNodeIds.has(node.id) && Math.random() < 0.4) {
+              activeNodeIds.add(node.id);
+            }
+          });
+        }
+        
+        // Determine blinking nodes (subset of active nodes + some inactive ones)
+        const newBlinkingNodes = new Set();
+        
+        // Add some active nodes to blinking set
+        activeNodeIds.forEach(id => {
+          if (Math.random() < 0.2) { // 20% chance for an active node to blink
+            newBlinkingNodes.add(id);
+          }
+        });
+        
+        // Add some inactive nodes to blinking set
+        const inactiveBlinkCount = Math.min(20, nodeCount - activeNodeIds.size);
+        let attempts = 0;
+        while (newBlinkingNodes.size < 20 && attempts < 40) {
+          attempts++;
+          const randomNodeIndex = Math.floor(Math.random() * nodeCount);
+          if (randomNodeIndex < nodeCount && graphData.nodes[randomNodeIndex]) {
+            const nodeId = graphData.nodes[randomNodeIndex].id;
+            if (!activeNodeIds.has(nodeId)) {
+              newBlinkingNodes.add(nodeId);
+            }
+          }
+        }
+        
         setBlinkingNodes(newBlinkingNodes);
       }, 500);
       
@@ -97,27 +215,73 @@ const InitialView = () => {
     } else {
       setBlinkingNodes(new Set());
     }
-  }, [isTesting, graphData.nodes]);
+  }, [isTesting, graphData.nodes, graphData.links]);
 
-  // Function to generate personas with Indian segments
+  // Function to generate personas with different groups
   const generatePersonas = () => {
-    // Use new segments representing parts of India
-    const segments = ["North India", "South India", "East India", "West India"];
+    // Use generic groups instead of regional segments
+    const segments = ["Group A", "Group B", "Group C", "Group D"];
     const generatedPersonas = [];
+    
+    // Diverse first names for personalized nodes
+    const firstNames = [
+      "Alex", "Jamie", "Jordan", "Taylor", "Morgan", "Casey", "Riley", "Avery", "Quinn", "Dakota",
+      "Cameron", "Reese", "Finley", "Emerson", "Rowan", "Sage", "Blake", "Parker", "Charlie", "Hayden",
+      "Skyler", "Phoenix", "Robin", "Kendall", "Kai", "River", "Remy", "Jesse", "Ash", "Drew",
+      "Leslie", "Dana", "Logan", "Shawn", "Kerry", "Terry", "Sidney", "Jody", "Pat", "Tracy"
+    ];
+    
+    // Last names for personalized nodes
+    const lastNames = [
+      "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez",
+      "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin",
+      "Lee", "Perez", "Thompson", "White", "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson",
+      "Walker", "Young", "Allen", "King", "Wright", "Scott", "Torres", "Nguyen", "Hill", "Flores"
+    ];
 
-    // Create a large number of personas
-    for (let i = 0; i < 988; i++) {
+    // Create 400 personas to reduce clutter while still having plenty
+    for (let i = 0; i < 400; i++) {
       // Select a random mock persona to base attributes on
       const baseMockPersona = MOCK_PERSONA_DATA[Math.floor(Math.random() * MOCK_PERSONA_DATA.length)];
       
-      // Assign segment from parts of India
-      const segment = segments[Math.floor(Math.random() * segments.length)];
+      // Balance segments evenly with ~100 per group
+      const segmentIndex = Math.floor(i / 100) % 4;
+      const segment = segments[segmentIndex];
+      
+      // Generate a unique name for this persona
+      const firstName = firstNames[Math.floor(Math.random() * firstNames.length)];
+      const lastName = lastNames[Math.floor(Math.random() * lastNames.length)];
+      const fullName = `${firstName} ${lastName}`;
+      
+      // Vary size by group for better visual distinction
+      let baseSize;
+      switch(segmentIndex) {
+        case 0: baseSize = 1.2; break; // Group A
+        case 1: baseSize = 1.0; break; // Group B
+        case 2: baseSize = 1.4; break; // Group C
+        case 3: baseSize = 1.6; break; // Group D
+        default: baseSize = 1.2;
+      }
+      
+      // Small random variation (+/- 20%)
+      const uniqueSize = baseSize * (0.8 + Math.random() * 0.4);
+      
+      // Fewer square nodes for visual cohesion (10% squares)
+      const uniqueShape = Math.random() > 0.9 ? "square" : "circle";
+      
+      // Patterns: 60% of nodes have no pattern for a clean look
+      const uniquePatternId = Math.random() > 0.4 ? 0 : Math.floor(Math.random() * 5);
       
       generatedPersonas.push({
         id: `persona-${i}`,
+        name: fullName,
+        displayId: `ID-${Math.floor(1000 + Math.random() * 9000)}`, // 4-digit ID
         segment,
         attributes: { ...baseMockPersona },
-        size: Math.random() * 3 + 1, // Random size between 1 and 4
+        size: uniqueSize,
+        shape: uniqueShape,
+        patternId: uniquePatternId,
+        pulseRate: Math.random() * 0.7 + 0.3, // Random pulse rate for animations
       });
     }
     setPersonas(generatedPersonas);
@@ -125,52 +289,12 @@ const InitialView = () => {
 
   // Function to generate network graph based on active segments
   const generateGraph = () => {
-    const nodes = [];
-    const links = [];
-    
-    personas.forEach(persona => {
-      const segmentId = persona.segment.toLowerCase().replace(' ', '-');
-      if (activeSegments.includes('all') || activeSegments.includes(segmentId)) {
-        nodes.push({
-          id: persona.id,
-          persona,
-          color: SEGMENT_COLORS[persona.segment] || "#999999",
-          size: persona.size,
-        });
-      }
-    });
-    
-    // Create links (a subset for clarity)
-    for (let i = 0; i < nodes.length; i++) {
-      const linkCount = Math.floor(Math.random() * 3) + 1;
-      for (let j = 0; j < linkCount; j++) {
-        const sameSegmentNodes = nodes.filter(n => 
-          n.persona.segment === nodes[i].persona.segment && n.id !== nodes[i].id
-        );
-        const targetPool = Math.random() < 0.8 && sameSegmentNodes.length > 0 
-          ? sameSegmentNodes 
-          : nodes.filter(n => n.id !== nodes[i].id);
-        
-        if (targetPool.length > 0) {
-          const targetNode = targetPool[Math.floor(Math.random() * targetPool.length)];
-          const linkExists = links.some(link => 
-            (link.source === nodes[i].id && link.target === targetNode.id) ||
-            (link.source === targetNode.id && link.target === nodes[i].id)
-          );
-          if (!linkExists && Math.random() < 0.3) {
-            links.push({
-              source: nodes[i].id,
-              target: targetNode.id,
-              value: Math.random() * 0.5 + 0.1
-            });
-          }
-        }
-      }
-    }
+    // Use the enhanced graph generator function that ensures full connectivity
+    const { nodes, links } = generateEnhancedGraph(personas, activeSegments, SEGMENT_COLORS);
     setGraphData({ nodes, links });
   };
 
-  // Toggle segment visibility
+  // Toggle group visibility
   const toggleSegment = (segmentId) => {
     setActiveSegments(prev => {
       if (segmentId === 'all') {
@@ -185,25 +309,12 @@ const InitialView = () => {
     });
   };
 
-  // Update OpenRouter API key
-  const updateApiKey = () => {
-    const key = prompt("Enter your OpenRouter API key:");
-    if (key) {
-      localStorage.setItem('openrouter_api_key', key);
-      setOpenrouterKey(key);
-    }
-  };
+  // No longer needed as we're using backend API
 
-  // Run simulation and make LLM request for multiple persona responses
+  // Run simulation using the backend API
   const runSimulation = async () => {
     if (!productDescription.trim()) {
       toast.error("Please describe your product or service first!");
-      return;
-    }
-    
-    if (!openrouterKey && !process.env.REACT_APP_OPENROUTER_KEY) {
-      toast.error("Please set your OpenRouter API key first!");
-      updateApiKey();
       return;
     }
     
@@ -213,76 +324,114 @@ const InitialView = () => {
     }
     
     setIsTesting(true);
-    setTestingMessage(`Testing with diverse personas from different parts of India. This will take ~2 mins.`);
+    setTestingMessage(`Simulating network responses across different regions of India. This will take a moment...`);
     setInputPanelOpen(false);
     
     try {
-      // Simulate network delay
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Simulate initial network delay
+      await new Promise(resolve => setTimeout(resolve, 1000));
       
-      // Updated system prompt for Indian segments and multiple responses
-      const systemPrompt = `You are an AI that analyzes how a network of diverse personas from different parts of India (North India, South India, East India, West India) would respond to a pitch or product description.
-For each segment, provide:
-1. An overall sentiment score from 0-100.
-2. An attention score from 0-100 indicating how memorable or interesting the pitch is.
-3. A detailed 150-word analysis highlighting strengths, weaknesses, and specific feedback for that region.
-4. 1-2 specific action items to improve the pitch.
-Return separate responses for each persona segment.`;
+      setTestingMessage("Analyzing responses and generating persona insights...");
       
-      setTestingMessage("Analyzing network responses and generating insights...");
-      
-      const apiKey = openrouterKey || process.env.REACT_APP_OPENROUTER_KEY;
-      
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      // Make API call to your backend
+      const response = await fetch("http://localhost:8000/api/v1/simulate", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-          "HTTP-Referer": window.location.href,
-          "X-Title": "Social-Network-Simulator",
         },
         body: JSON.stringify({
-          model: "google/gemini-2.0-flash-001",
-          messages: [
-            { role: "system", content: systemPrompt },
-            {
-              role: "user",
-              content: `Analyze how different people would react to this product/service description: "${productDescription}". Provide separate detailed insights for each region of India.`
-            }
-          ],
-          max_tokens: 1000,
-          temperature: 0.7,
-          n: 4, 
-          stream: false,
+          prompt: productDescription
         }),
       });
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(`OpenRouter API error: ${response.status} ${errorData.error || ""}`);
+        throw new Error(`Backend API error: ${response.status} ${errorData.error || ""}`);
       }
       
       const data = await response.json();
       
-      // Process each response from the LLM
-      const results = data.choices.map(choice => {
-        const responseText = choice.message.content;
-        let sentimentScore = responseText.match(/sentiment score[:\s]*(\d+)/i)?.[1];
-        sentimentScore = sentimentScore ? parseInt(sentimentScore) : Math.floor(Math.random() * 30) + 60;
-        let attentionScore = responseText.match(/attention score[:\s]*(\d+)/i)?.[1];
-        attentionScore = attentionScore ? parseInt(attentionScore) : Math.floor(Math.random() * 40) + 40;
-        let insights = responseText;
-        if (!responseText.includes("sentiment score") && !responseText.includes("attention score")) {
-          const responseLines = responseText.split('\n').filter(line => line.trim());
-          const insightsPart = responseLines.slice(0, -2).join('\n');
-          const actionsPart = responseLines.slice(-2).join('\n');
-          insights = `Wave Insights\n\n${insightsPart}\n\nWave Actions\n\n${actionsPart}`;
+      // Process the backend API response
+      if (!data.results || !Array.isArray(data.results) || data.results.length === 0) {
+        throw new Error("Invalid response format from backend");
+      }
+      
+      // Transform the backend response into our application format
+      const personaResults = data.results[0].persona_results || [];
+      
+      // Ensure we have enough personas to distribute - if not enough, duplicate some
+      const paddedResults = [...personaResults];
+      while (paddedResults.length < 4) {
+        // Duplicate existing responses if we have fewer than 4
+        const sourceIndex = paddedResults.length % personaResults.length;
+        if (personaResults[sourceIndex]) {
+          paddedResults.push({...personaResults[sourceIndex]});
+        } else {
+          // If somehow we have no valid personas at all, create a dummy one
+          paddedResults.push({
+            thought: "No analysis available.",
+            decision: "Unable to determine.",
+            score: 5,
+            persona_excerpt: "No persona information available."
+          });
         }
+      }
+      
+      // Group results by regions (North, South, East, West India)
+      const regions = ["North India", "South India", "East India", "West India"];
+      const results = regions.map((region, index) => {
+        // Determine sentiment from scores (either use the actual data or generate fallbacks)
+        const personaData = paddedResults[index] || {
+          thought: "No analysis available for this region.",
+          decision: "Unable to provide insights for this region.",
+          score: Math.floor(Math.random() * 5) + 5, // Random score between 5-10
+          persona_excerpt: "No persona information available."
+        };
+        
+        // Convert 0-10 score to 0-100
+        const sentimentScore = Math.min(100, Math.floor((personaData.score || 5) * 10));
+        
+        // Thoughts and decisions from persona data
+        const thoughts = personaData.thought || "No detailed analysis available for this region.";
+        const decision = personaData.decision || "No opinion available.";
+        
+        // Generate smart action items based on the sentiment score
+        let actionItems = [];
+        
+        if (sentimentScore >= 75) {
+          actionItems = [
+            `Leverage ${region}'s positive reception in marketing campaigns.`,
+            `Consider ${region} as an early launch market for this product.`
+          ];
+        } else if (sentimentScore >= 50) {
+          actionItems = [
+            `Address ${region}'s specific concerns before full rollout.`,
+            `Adapt marketing messaging to highlight value proposition for ${region}.`
+          ];
+        } else {
+          actionItems = [
+            `Reconsider product features to better align with ${region}'s needs.`,
+            `Conduct additional market research in ${region} before launch.`
+          ];
+        }
+        
         return {
+          region,
           sentimentScore,
-          attentionScore,
-          insights,
+          attentionScore: Math.min(100, Math.floor(sentimentScore * (0.8 + Math.random() * 0.4))), // Varied attention score
+          thoughts,
+          opinion: decision,
+          actionItems,
+          personaExcerpt: personaData.persona_excerpt || "No persona information available.",
+          rawScore: personaData.score || 0,
+          insights: `Region: ${region}\n\n` +
+                   `Thoughts:\n${thoughts}\n\n` +
+                   `Opinion:\n${decision}\n\n` +
+                   `Action Items:\n` + 
+                   actionItems.map(item => `• ${item}`).join('\n'),
           timestamp: new Date().toISOString(),
+          // Store all raw persona data for this region for detailed view
+          personas: [personaData]
         };
       });
       
@@ -338,57 +487,226 @@ Return separate responses for each persona segment.`;
           ))}
         </div>
         
-        {/* Results panel */}
+        {/* Results Cards Panel with Glassmorphism Effect */}
         {showResults && simulationResults && (
-          <div className="absolute top-16 right-4 w-80 z-10 space-y-6 overflow-y-auto" style={{ maxHeight: '80vh' }}>
-            {simulationResults.map((result, index) => (
-              <div key={index} className="bg-gray-900 rounded-lg p-4 border border-gray-800">
-                <div className="flex justify-between items-center mb-2">
-                  <div className="text-sm text-gray-400">Sentiment score</div>
-                  <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </div>
-                <div className="text-5xl font-bold mb-2">{result.sentimentScore}</div>
-                <div className="w-full h-2 bg-gray-800 rounded-full">
-                  <div 
-                    className="h-full bg-blue-500 rounded-full" 
-                    style={{ width: `${result.sentimentScore}%` }}
-                  ></div>
-                </div>
-                <div className="flex justify-between items-center my-2">
-                  <div className="text-sm text-gray-400">Attention score</div>
-                  <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </div>
-                <div className="text-5xl font-bold mb-2">{result.attentionScore}</div>
-                <div className="w-full h-2 bg-gray-800 rounded-full mb-4">
-                  <div className="relative w-full">
-                    <div 
-                      className="absolute h-2 bg-yellow-500 rounded-full" 
-                      style={{ width: `${result.attentionScore}%`, right: 0 }}
-                    ></div>
+          <div className="absolute top-16 right-4 w-96 z-10 space-y-4 overflow-y-auto" style={{ maxHeight: '80vh' }}>
+            {simulationResults.map((result, index) => {
+              // Get region color or use default
+              const regionColor = SEGMENT_COLORS[result.region] || "#6366F1";
+              
+              return (
+                <div 
+                  key={index} 
+                  className="relative overflow-hidden rounded-xl cursor-pointer transition-all duration-300 hover:scale-[1.02]"
+                  onClick={() => {
+                    setSelectedPersona(result);
+                    setShowDetailModal(true);
+                  }}
+                >
+                  {/* Glassmorphism card */}
+                  <div className="backdrop-blur-md bg-black/40 border border-white/10 p-4 rounded-xl">
+                    {/* Glass highlight effect */}
+                    <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent pointer-events-none"></div>
+                    
+                    {/* Region header with color accent */}
+                    <div className="flex justify-between items-center mb-3">
+                      <div className="flex items-center">
+                        <div 
+                          className="w-3 h-12 rounded-sm mr-3" 
+                          style={{ backgroundColor: regionColor }}
+                        ></div>
+                        <div>
+                          <div className="text-lg font-semibold text-white">{result.region}</div>
+                          <div className="text-xs text-gray-400">Score: {result.rawScore}/10</div>
+                        </div>
+                      </div>
+                      <div className="rounded-md text-2xl font-bold text-white flex items-center">
+                        {result.sentimentScore}
+                        <span className="text-xs ml-1 text-gray-400">/ 100</span>
+                      </div>
+                    </div>
+                    
+                    {/* Bar chart for sentiment score */}
+                    <div className="mt-3 mb-4">
+                      <div className="w-full h-7 bg-black/50 rounded-md overflow-hidden relative">
+                        {/* Gradient bar */}
+                        <div 
+                          className="h-full rounded-md flex items-center justify-end pr-2 text-xs font-medium"
+                          style={{ 
+                            width: `${result.sentimentScore}%`, 
+                            background: `linear-gradient(90deg, ${regionColor}50, ${regionColor})`,
+                            boxShadow: `0 0 10px ${regionColor}50`
+                          }}
+                        ></div>
+                        {/* Label */}
+                        <div className="absolute inset-0 flex items-center justify-between px-3 text-xs">
+                          <span className="text-white font-medium">Sentiment Score</span>
+                          <span className="text-white font-bold">{result.sentimentScore}%</span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Opinion preview */}
+                    <div className="text-sm text-gray-200 line-clamp-2 mb-3 font-medium italic">
+                      "{result.opinion.length > 100 ? result.opinion.substring(0, 100) + '...' : result.opinion}"
+                    </div>
+                    
+                    {/* Click for details indicator */}
+                    <div className="flex justify-end mt-2">
+                      <span className="text-xs text-gray-400 flex items-center">
+                        <span className="mr-1 w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
+                        Click for details
+                      </span>
+                    </div>
                   </div>
                 </div>
-                {/* Insights */}
-                <div className="bg-gray-900 rounded-lg p-4 border border-gray-800 overflow-y-auto" style={{ maxHeight: '200px' }}>
-                  <div className="text-sm text-gray-400 mb-2">Wave Insights</div>
-                  <div className="text-sm">
-                    {result.insights.split('Wave Actions')[0].split('Wave Insights').slice(-1)[0].trim()}
+              );
+            })}
+          </div>
+        )}
+        
+        {/* Detailed Glassmorphism Modal */}
+        {showDetailModal && selectedPersona && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-5">
+            {/* Backdrop with blur */}
+            <div 
+              className="absolute inset-0 backdrop-blur-md bg-black/70"
+              onClick={() => setShowDetailModal(false)}
+            ></div>
+            
+            {/* Modal content */}
+            <div className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto bg-transparent">
+              {/* Close button */}
+              <button 
+                onClick={() => setShowDetailModal(false)}
+                className="absolute top-3 right-3 z-10 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white"
+              >
+                <X size={20} />
+              </button>
+              
+              {/* Main glassmorphism card */}
+              <div className="backdrop-blur-xl bg-black/60 border border-white/10 rounded-2xl overflow-hidden">
+                {/* Glass highlight effect */}
+                <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent pointer-events-none"></div>
+                
+                {/* Header with region and gradient accent */}
+                <div 
+                  className="p-8 relative"
+                  style={{ 
+                    background: `linear-gradient(to right, ${SEGMENT_COLORS[selectedPersona.region]}40, transparent)`
+                  }}
+                >
+                  <div className="flex justify-between">
+                    <div>
+                      <h2 className="text-2xl font-bold text-white mb-1">{selectedPersona.region}</h2>
+                      <p className="text-gray-400">Region Analysis Report</p>
+                    </div>
+                    <div className="flex flex-col items-end">
+                      <div className="text-4xl font-bold text-white">{selectedPersona.sentimentScore}</div>
+                      <div className="text-sm text-gray-400">Sentiment Score</div>
+                    </div>
                   </div>
                 </div>
-                {/* Actions */}
-                <div className="bg-gray-900 rounded-lg p-4 border border-gray-800 mt-2">
-                  <div className="text-sm text-gray-400 mb-2">Wave Actions</div>
-                  <div className="text-sm">
-                    {result.insights.includes('Wave Actions') 
-                      ? result.insights.split('Wave Actions')[1].trim()
-                      : "Keep your message clear and concise. Focus on the specific problem your solution addresses."}
+                
+                {/* Main content area */}
+                <div className="p-8">
+                  {/* Score visualization section */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                    {/* Sentiment score bar */}
+                    <div>
+                      <h3 className="text-white text-lg mb-2">Sentiment Score</h3>
+                      <div className="h-16 bg-black/40 rounded-xl overflow-hidden relative">
+                        <div 
+                          className="h-full rounded-xl flex items-center justify-end"
+                          style={{ 
+                            width: `${selectedPersona.sentimentScore}%`, 
+                            background: `linear-gradient(90deg, ${SEGMENT_COLORS[selectedPersona.region]}50, ${SEGMENT_COLORS[selectedPersona.region]})`,
+                            boxShadow: `0 0 15px ${SEGMENT_COLORS[selectedPersona.region]}30`
+                          }}
+                        >
+                          <span className="text-white font-bold text-lg pr-4">{selectedPersona.sentimentScore}%</span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Attention score bar */}
+                    <div>
+                      <h3 className="text-white text-lg mb-2">Attention Score</h3>
+                      <div className="h-16 bg-black/40 rounded-xl overflow-hidden relative">
+                        <div 
+                          className="h-full rounded-xl flex items-center justify-end"
+                          style={{ 
+                            width: `${selectedPersona.attentionScore}%`, 
+                            background: `linear-gradient(90deg, #EAB30850, #EAB308)`,
+                            boxShadow: '0 0 15px rgba(234, 179, 8, 0.3)'
+                          }}
+                        >
+                          <span className="text-white font-bold text-lg pr-4">{selectedPersona.attentionScore}%</span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
+                  
+                  {/* Detail sections */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* Left column */}
+                    <div className="space-y-6">
+                      {/* Opinion section */}
+                      <div className="bg-white/5 rounded-xl p-6">
+                        <h3 className="text-white text-lg mb-4 flex items-center">
+                          <span className="w-2 h-2 rounded-full bg-blue-400 mr-2"></span>
+                          Opinion
+                        </h3>
+                        <p className="text-gray-200 italic">"{selectedPersona.opinion}"</p>
+                      </div>
+                      
+                      {/* Action items */}
+                      <div className="bg-white/5 rounded-xl p-6">
+                        <h3 className="text-white text-lg mb-4 flex items-center">
+                          <span className="w-2 h-2 rounded-full bg-green-400 mr-2"></span>
+                          Recommended Actions
+                        </h3>
+                        <ul className="space-y-3">
+                          {selectedPersona.actionItems.map((item, i) => (
+                            <li key={i} className="flex items-start">
+                              <span className="text-green-400 mr-2 pt-1">•</span>
+                              <span className="text-gray-200">{item}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                    
+                    {/* Right column */}
+                    <div>
+                      {/* Detailed thoughts */}
+                      <div className="bg-white/5 rounded-xl p-6 h-full">
+                        <h3 className="text-white text-lg mb-4 flex items-center">
+                          <span className="w-2 h-2 rounded-full bg-purple-400 mr-2"></span>
+                          Detailed Analysis
+                        </h3>
+                        <div className="text-gray-200 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                          {selectedPersona.thoughts}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Persona Excerpt */}
+                  {selectedPersona.personaExcerpt && (
+                    <div className="mt-6 bg-white/5 rounded-xl p-6">
+                      <h3 className="text-white text-lg mb-4 flex items-center">
+                        <span className="w-2 h-2 rounded-full bg-yellow-400 mr-2"></span>
+                        Persona Information
+                      </h3>
+                      <div className="text-gray-300 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                        {selectedPersona.personaExcerpt}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
-            ))}
+            </div>
           </div>
         )}
         
@@ -399,48 +717,237 @@ Return separate responses for each persona segment.`;
             graphData={graphData}
             nodeColor={node => {
               if (isTesting) {
+                // During testing, blinking nodes get their original color
+                // Other nodes are gray
                 return blinkingNodes.has(node.id) ? node.color : "#555555";
+              }
+              // For hover effects, use highlighted flag
+              if (node.id === highlightedNodeId) {
+                return node.color; // Use original color but brighter
               }
               return node.color;
             }}
-            nodeRelSize={3}
-            linkWidth={link => link.value * 2}
-            linkColor={() => '#ffffff20'}
+            nodeRelSize={2.5} // Slightly smaller relative node size
+            d3AlphaDecay={0.3} // Higher decay for faster settling
+            d3VelocityDecay={0.5} // Higher decay to reduce movement
+            warmupTicks={50}
+            cooldownTicks={50}
+            cooldownTime={1000}
+            linkWidth={link => link.value * 1.5} // Thinner links
+            linkColor={(link) => {
+              // Use link's alpha property for transparency
+              const baseColor = '#ffffff';
+              const alpha = link.alpha || 0.2;
+              return `${baseColor}${Math.floor(alpha * 255).toString(16).padStart(2, '0')}`;
+            }}
+            linkLineDash={(link) => link.type === 'dashed' ? [2, 2] : []}
             backgroundColor="#000000"
-            cooldownTicks={100}
+            nodeVal={node => Math.pow(node.size, 2.2)} // Spacing based on node size
+            enableNodeDrag={false} // Disable node dragging to prevent layout shifts
+            minZoom={0.5}
+            maxZoom={5}
+            // Use minimal force configuration
+            d3Force={(id, force) => {
+              // After the initial layout, fix all node positions
+              if (nodesFixedRef.current && (id === 'charge' || id === 'center' || id === 'link')) {
+                // Set to minimal values or disable forces once nodes are fixed
+                if (id === 'charge' && force.strength) {
+                  force.strength(0);
+                }
+                if (id === 'center' && force.strength) {
+                  force.strength(0);
+                }
+              } else {
+                // Initial layout forces
+                if (id === 'charge') {
+                  force.strength(-150);
+                }
+                if (id === 'link') {
+                  force.distance(30).strength(0.4);
+                }
+                if (id === 'center') {
+                  force.strength(0.2);
+                }
+              }
+            }}
             nodeCanvasObjectMode={() => 'after'}
+            // Simplified hover handler that only updates highlighted node ID 
+            // without causing any position changes
+            onNodeHover={node => {
+              setHighlightedNodeId(node ? node.id : null);
+            }}
+            // Fixed node canvas rendering function
             nodeCanvasObject={(node, ctx, globalScale) => {
+              // Use fixed position
+              const renderX = node.fx !== undefined ? node.fx : node.x;
+              const renderY = node.fy !== undefined ? node.fy : node.y;
+              
               const size = node.size || 3;
               const isBlinking = blinkingNodes.has(node.id);
-              ctx.beginPath();
-              ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
+              const isHighlighted = node.id === highlightedNodeId;
               
+              // Determine if we need to apply patterns based on zoom level
+              const showDetail = globalScale > 1.2;
+              
+              // Define pattern based on node's patternId - simplified patterns
+              const renderPattern = () => {
+                // Only apply pattern if we're showing detail and node has a pattern
+                if (!showDetail || node.patternId === 0) return false;
+                
+                switch(node.patternId) {
+                  case 1:
+                    // Simple ring
+                    ctx.beginPath();
+                    ctx.arc(renderX, renderY, size * 0.7, 0, 2 * Math.PI);
+                    ctx.strokeStyle = hexToRGBA('#ffffff', 0.4);
+                    ctx.lineWidth = 0.5;
+                    ctx.stroke();
+                    break;
+                  case 2:
+                    // Dot in center
+                    ctx.beginPath();
+                    ctx.arc(renderX, renderY, size * 0.3, 0, 2 * Math.PI);
+                    ctx.fillStyle = hexToRGBA('#ffffff', 0.5);
+                    ctx.fill();
+                    break;
+                  case 3:
+                    // Ring pattern with lighter color
+                    ctx.beginPath();
+                    ctx.arc(renderX, renderY, size * 0.7, 0, 2 * Math.PI);
+                    ctx.strokeStyle = hexToRGBA('#ffffff', 0.3);
+                    ctx.lineWidth = size * 0.15;
+                    ctx.stroke();
+                    return true;
+                  case 4:
+                    // Small dot outline
+                    ctx.beginPath();
+                    ctx.arc(renderX, renderY, size * 0.8, 0, 2 * Math.PI);
+                    ctx.strokeStyle = hexToRGBA('#ffffff', 0.3);
+                    ctx.lineWidth = size * 0.1;
+                    ctx.stroke();
+                    return true;
+                  default:
+                    // No pattern
+                    break;
+                }
+                return false;
+              };
+              // Draw the base shape - mostly circles for visual consistency
+              if (node.shape === 'square' && showDetail) {
+                // Only draw squares when zoomed in enough
+                ctx.beginPath();
+                const roundedCorners = 0.2; // slight rounding
+                ctx.roundRect(renderX - size/2, renderY - size/2, size, size, [size * roundedCorners]);
+              } else {
+                ctx.beginPath();
+                ctx.arc(renderX, renderY, size, 0, 2 * Math.PI);
+              }
+              
+              // Fill based on testing state
               if (isTesting) {
                 if (isBlinking) {
-                  // Create glow effect using the node's color
+                  // Subtler glow effect
                   const glow = ctx.createRadialGradient(
-                    node.x, node.y, size * 0.5,
-                    node.x, node.y, size * 2
+                    renderX, renderY, size * 0.5,
+                    renderX, renderY, size * 2
                   );
-                  glow.addColorStop(0, hexToRGBA(node.color, 0.8));
+                  glow.addColorStop(0, hexToRGBA(node.color, 0.7));
                   glow.addColorStop(1, hexToRGBA(node.color, 0));
                   ctx.fillStyle = glow;
                   ctx.fill();
-                  ctx.beginPath();
-                  ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
+                  
+                  // Redraw the shape for the solid fill
+                  if (node.shape === 'square' && showDetail) {
+                    ctx.beginPath();
+                    ctx.roundRect(renderX - size/2, renderY - size/2, size, size, [size * 0.2]);
+                  } else {
+                    ctx.beginPath();
+                    ctx.arc(renderX, renderY, size, 0, 2 * Math.PI);
+                  }
                   ctx.fillStyle = node.color;
                 } else {
+                  // Gray out non-blinking nodes
                   ctx.fillStyle = "#555555";
                 }
               } else {
-                ctx.fillStyle = node.color;
+                // Normal state - apply a slight transparency to reduce visual weight
+                ctx.fillStyle = hexToRGBA(node.color, 0.9);
               }
               ctx.fill();
+              
+              // Apply patterns if showing detail
+              if (showDetail) {
+                renderPattern();
+              }
+              
+              // Draw highlight for hovered node
+              if (isHighlighted) {
+                // Draw a halo around the node
+                ctx.beginPath();
+                if (node.shape === 'square' && showDetail) {
+                  const highlightSize = size * 1.3;
+                  ctx.roundRect(renderX - highlightSize/2, renderY - highlightSize/2, highlightSize, highlightSize, [size * 0.2]);
+                } else {
+                  ctx.arc(renderX, renderY, size * 1.3, 0, 2 * Math.PI);
+                }
+                ctx.strokeStyle = hexToRGBA('#ffffff', 0.6);
+                ctx.lineWidth = size * 0.15;
+                ctx.stroke();
+                
+                // Draw info panel instead of text directly on canvas
+                const panelWidth = 120;
+                const panelHeight = 45;
+                const panelX = renderX + 15; // Position to the right
+                const panelY = renderY - 10;
+                
+                // Draw panel background with subtle transparency
+                ctx.fillStyle = hexToRGBA('#111111', 0.85);
+                ctx.beginPath();
+                ctx.roundRect(panelX, panelY, panelWidth, panelHeight, [5]);
+                ctx.fill();
+                
+                // Add subtle border
+                ctx.strokeStyle = hexToRGBA('#444444', 0.5);
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                
+                // Draw name with shadow for better readability
+                ctx.font = '10px Arial';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'top';
+                
+                // Text shadow effect
+                ctx.fillStyle = '#000000';
+                ctx.fillText(node.name, panelX + 7 + 1, panelY + 10 + 1); // Shadow offset
+                
+                // Actual text
+                ctx.fillStyle = '#ffffff';
+                ctx.fillText(node.name, panelX + 7, panelY + 10);
+                
+                // Draw ID below
+                ctx.fillStyle = '#aaaaaa';
+                ctx.font = '9px Arial';
+                ctx.fillText(node.displayId, panelX + 7, panelY + 25);
+              }
+              
+              // Apply subtle pulsing effect during testing
+              if (isTesting && !isBlinking && Math.random() < 0.005) { // Reduced frequency
+                const pulseSize = size * (1 + Math.sin(Date.now() * 0.008 * node.pulseRate) * 0.15);
+                ctx.beginPath();
+                ctx.arc(renderX, renderY, pulseSize, 0, 2 * Math.PI);
+                ctx.strokeStyle = hexToRGBA(node.color, 0.2); // More subtle
+                ctx.lineWidth = 0.5;
+                ctx.stroke();
+              }
             }}
             onNodeClick={(node) => {
-              graphRef.current.centerAt(node.x, node.y, 1000);
-              graphRef.current.zoom(2, 1000);
+              if (graphRef.current) {
+                graphRef.current.centerAt(node.fx || node.x, node.fy || node.y, 1000);
+                graphRef.current.zoom(2, 1000);
+              }
             }}
+            linkDirectionalParticles={(link) => link.strength * 4}
+            linkDirectionalParticleSpeed={(link) => link.strength * 0.01}
           />
         </div>
         
@@ -464,7 +971,7 @@ Return separate responses for each persona segment.`;
               <button 
                 className="bg-white text-black px-4 py-1 rounded-md flex items-center"
                 onClick={runSimulation}
-                disabled={isLoading || !openrouterKey}
+                disabled={isLoading}
               >
                 <span>Simulate</span>
                 <svg className="w-4 h-4 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -474,15 +981,10 @@ Return separate responses for each persona segment.`;
             </div>
             <textarea
               className="w-full h-24 bg-transparent border border-gray-800 rounded-md p-3 focus:outline-none focus:border-blue-500"
-              placeholder="Type here..."
+              placeholder="Type your product or service description here..."
               value={productDescription}
               onChange={(e) => setProductDescription(e.target.value)}
             ></textarea>
-            {!openrouterKey && (
-              <div className="mt-2 text-red-400 text-sm">
-                Please set your OpenRouter API key first by clicking the info icon.
-              </div>
-            )}
           </animated.div>
         )}
         

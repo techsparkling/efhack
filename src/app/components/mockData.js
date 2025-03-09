@@ -1,4 +1,4 @@
-// File: src/data/mockData.js
+// File: src/app/components/mockData.js
 // This file contains mock data for Indian consumer personas
 
 export const MOCK_PERSONA_DATA = [
